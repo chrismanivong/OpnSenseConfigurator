@@ -1,30 +1,27 @@
-import json
+from types import SimpleNamespace
+
+import pytest
 
 from opnsense_configurator.client import OPNsenseClient, OPNsenseCredentials
 from opnsense_configurator.models import AliasDefinition
 
 
-def test_upsert_alias_calls_expected_endpoint(monkeypatch):
-    called = {}
+def test_upsert_alias_calls_backend_post(monkeypatch):
+    calls = {}
 
-    class FakeResponse:
-        def __enter__(self):
-            return self
+    class FakeBackend:
+        def __init__(self, **kwargs):
+            calls["kwargs"] = kwargs
 
-        def __exit__(self, exc_type, exc, tb):
-            return None
+        def post(self, endpoint, payload):
+            calls["endpoint"] = endpoint
+            calls["payload"] = payload
+            return {"result": "ok"}
 
-        @staticmethod
-        def read():
-            return b'{"result":"ok"}'
-
-    def fake_urlopen(req, timeout, context=None):
-        called["req"] = req
-        called["timeout"] = timeout
-        called["context"] = context
-        return FakeResponse()
-
-    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    monkeypatch.setattr(
+        "importlib.import_module",
+        lambda name: SimpleNamespace(OPNsenseClient=FakeBackend) if name == "pyopnsense" else None,
+    )
 
     client = OPNsenseClient(
         base_url="https://fw.example.local/",
@@ -40,12 +37,11 @@ def test_upsert_alias_calls_expected_endpoint(monkeypatch):
     )
 
     assert response == {"result": "ok"}
-    assert called["timeout"] == 15
-    assert called["req"].method == "POST"
-    assert called["req"].full_url == "https://fw.example.local/api/firewall/alias/setItem"
-
-    payload = json.loads(called["req"].data.decode())
-    assert payload == {
+    assert calls["endpoint"] == "firewall/alias/setItem"
+    assert calls["kwargs"]["base_url"] == "https://fw.example.local"
+    assert calls["kwargs"]["api_key"] == "k"
+    assert calls["kwargs"]["api_secret"] == "s"
+    assert calls["payload"] == {
         "alias": {
             "name": "HQ-Nodes",
             "type": "host",
@@ -55,25 +51,20 @@ def test_upsert_alias_calls_expected_endpoint(monkeypatch):
     }
 
 
-def test_upsert_alias_can_disable_ssl_verification(monkeypatch):
-    called = {}
+def test_upsert_alias_passes_ssl_verify_to_pyopnsense(monkeypatch):
+    calls = {}
 
-    class FakeResponse:
-        def __enter__(self):
-            return self
+    class FakeBackend:
+        def __init__(self, **kwargs):
+            calls["kwargs"] = kwargs
 
-        def __exit__(self, exc_type, exc, tb):
-            return None
+        def post(self, endpoint, payload):
+            return {"result": "ok"}
 
-        @staticmethod
-        def read():
-            return b'{"result":"ok"}'
-
-    def fake_urlopen(req, timeout, context=None):
-        called["context"] = context
-        return FakeResponse()
-
-    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    monkeypatch.setattr(
+        "importlib.import_module",
+        lambda name: SimpleNamespace(OPNsenseClient=FakeBackend) if name == "pyopnsense" else None,
+    )
 
     client = OPNsenseClient(
         base_url="https://fw.example.local/",
@@ -84,29 +75,23 @@ def test_upsert_alias_can_disable_ssl_verification(monkeypatch):
     response = client.upsert_alias(AliasDefinition(name="HQ-Nodes", content=["10.0.10.10"]))
 
     assert response == {"result": "ok"}
-    assert called["context"] is not None
-    assert called["context"].check_hostname is False
+    assert calls["kwargs"]["verify_ssl"] is False
 
 
 def test_upsert_alias_does_not_duplicate_api_prefix(monkeypatch):
-    called = {}
+    calls = {}
 
-    class FakeResponse:
-        def __enter__(self):
-            return self
+    class FakeBackend:
+        def __init__(self, **kwargs):
+            calls["kwargs"] = kwargs
 
-        def __exit__(self, exc_type, exc, tb):
-            return None
+        def post(self, endpoint, payload):
+            return {"result": "ok"}
 
-        @staticmethod
-        def read():
-            return b'{"result":"ok"}'
-
-    def fake_urlopen(req, timeout, context=None):
-        called["req"] = req
-        return FakeResponse()
-
-    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    monkeypatch.setattr(
+        "importlib.import_module",
+        lambda name: SimpleNamespace(OPNsenseClient=FakeBackend) if name == "pyopnsense" else None,
+    )
 
     client = OPNsenseClient(
         base_url="https://fw.example.local/api/",
@@ -116,4 +101,17 @@ def test_upsert_alias_does_not_duplicate_api_prefix(monkeypatch):
     response = client.upsert_alias(AliasDefinition(name="HQ-Nodes", content=["10.0.10.10"]))
 
     assert response == {"result": "ok"}
-    assert called["req"].full_url == "https://fw.example.local/api/firewall/alias/setItem"
+    assert calls["kwargs"]["base_url"] == "https://fw.example.local"
+
+
+def test_client_raises_helpful_error_when_pyopnsense_missing(monkeypatch):
+    def fail_import(name):
+        raise ModuleNotFoundError(name)
+
+    monkeypatch.setattr("importlib.import_module", fail_import)
+
+    with pytest.raises(RuntimeError, match="pyopnsense ist nicht installiert"):
+        OPNsenseClient(
+            base_url="https://fw.example.local/",
+            credentials=OPNsenseCredentials(key="k", secret="s"),
+        )

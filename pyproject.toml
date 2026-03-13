@@ -4,7 +4,9 @@ version = "0.1.0"
 description = "Zentrale Verwaltung von OPNsense Aliases und Firewall-Regeln über die OPNsense API"
 readme = "README.md"
 requires-python = ">=3.10"
-dependencies = []
+dependencies = [
+  "pyopnsense",
+]
 
 [project.optional-dependencies]
 dev = [
