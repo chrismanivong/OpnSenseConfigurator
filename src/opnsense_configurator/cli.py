@@ -8,7 +8,7 @@ import os
 import re
 from pathlib import Path
 
-from .client import OPNsenseClient, OPNsenseCredentials
+from .client import OPNsenseCredentials, create_client
 from .models import AliasDefinition
 
 DEFAULT_API_KEY_DIR = "./firewall-keys"
@@ -187,20 +187,59 @@ def _load_targets_from_directory(
     return targets
 
 
+def _normalize_firewall_alias_name(fqdn: str) -> str:
+    name = re.sub(r"[^A-Za-z0-9]+", "_", fqdn).strip("_")
+    if not name:
+        return "FIREWALL"
+    if name[0].isdigit():
+        name = f"FW_{name}"
+    return name.upper()
+
+
 def _aliases_from_config(config: dict) -> list[AliasDefinition]:
     aliases = config.get("aliases", {})
-    if not aliases:
+    firewalls = config.get("firewalls", {})
+
+    by_name: dict[str, AliasDefinition] = {}
+
+    if isinstance(aliases, dict):
+        for alias_name, alias_data in aliases.items():
+            network = alias_data.get("network") if isinstance(alias_data, dict) else None
+            if not network:
+                raise SystemExit(f"Alias {alias_name} muss ein Feld 'network' enthalten.")
+            description = alias_data.get("description") if isinstance(alias_data, dict) else None
+            LOGGER.debug("Alias aus Konfiguration geladen: %s -> %s", alias_name, network)
+            by_name[str(alias_name)] = AliasDefinition(
+                name=str(alias_name),
+                type="network",
+                content=[str(network)],
+                description=str(description) if description else None,
+            )
+
+    if isinstance(firewalls, dict):
+        for fqdn, firewall_config in firewalls.items():
+            ip = firewall_config.get("ip") if isinstance(firewall_config, dict) else None
+            if not ip:
+                continue
+            derived_name = _normalize_firewall_alias_name(str(fqdn))
+            if derived_name in by_name:
+                LOGGER.debug(
+                    "Überspringe abgeleiteten Firewall-Alias %s (bereits explizit definiert).",
+                    derived_name,
+                )
+                continue
+            LOGGER.debug("Leite Firewall-Alias ab: %s -> %s", derived_name, ip)
+            by_name[derived_name] = AliasDefinition(
+                name=derived_name,
+                type="host",
+                content=[str(ip)],
+                description=f"Firewall {fqdn}",
+            )
+
+    if not by_name:
         raise SystemExit("Keine Aliase in der YAML-Konfiguration gefunden.")
 
-    result: list[AliasDefinition] = []
-    for alias_name, alias_data in aliases.items():
-        network = alias_data.get("network") if isinstance(alias_data, dict) else None
-        if not network:
-            raise SystemExit(f"Alias {alias_name} muss ein Feld 'network' enthalten.")
-        LOGGER.debug("Alias aus Konfiguration geladen: %s -> %s", alias_name, network)
-        result.append(AliasDefinition(name=alias_name, type="network", content=[network]))
-
-    return result
+    return list(by_name.values())
 
 
 def main() -> None:
@@ -227,11 +266,23 @@ def main() -> None:
 
     for target_name, url, credentials, ssl_verify in targets:
         LOGGER.info("Verbinde mich gleich zur OPNsense API unter %s (%s)", url, target_name)
-        client = OPNsenseClient(url, credentials, ssl_verify=ssl_verify)
+        client = create_client(url, credentials, ssl_verify=ssl_verify)
         for alias in aliases:
             LOGGER.debug("Rolle Alias '%s' auf '%s' aus", alias.name, target_name)
-            result = client.upsert_alias(alias)
-            print(f"[{target_name}] {alias.name}: {result}")
+            response = client.run_module(
+                "alias",
+                params={
+                    "name": alias.name,
+                    "type": alias.type,
+                    "content": list(alias.content),
+                    "description": alias.description or "",
+                    "state": "present",
+                },
+            )
+            if response.get("error"):
+                raise SystemExit(f"[{target_name}] {alias.name}: {response['error']}")
+
+            print(f"[{target_name}] {alias.name}: {response['result']}")
 
 
 if __name__ == "__main__":

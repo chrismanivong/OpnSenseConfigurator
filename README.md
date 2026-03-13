@@ -2,7 +2,7 @@
 
 Ein Python-Projekt für die zentrale Verwaltung von OPNsense-Konfigurationen (zunächst Aliases und Firewall-Regeln) über die OPNsense API.
 
-Die API-Kommunikation läuft über die Bibliothek **pyopnsense** aus PyPI.
+Die API-Kommunikation läuft über `oxl-opnsense-client`.
 
 ## Zielbild
 

@@ -67,6 +67,32 @@ def test_aliases_from_config_reads_network_aliases():
     assert aliases[0].content == ["10.10.0.0/24"]
 
 
+def test_aliases_from_config_adds_firewall_ip_as_host_alias():
+    aliases = _aliases_from_config(
+        {
+            "firewalls": {"off-opn-01.office.local": {"ip": "10.10.0.1"}},
+            "aliases": {"management_network": {"network": "10.10.0.0/24"}},
+        }
+    )
+
+    by_name = {alias.name: alias for alias in aliases}
+    assert by_name["OFF_OPN_01_OFFICE_LOCAL"].type == "host"
+    assert by_name["OFF_OPN_01_OFFICE_LOCAL"].content == ["10.10.0.1"]
+
+
+def test_aliases_from_config_allows_only_firewalls_without_explicit_aliases():
+    aliases = _aliases_from_config(
+        {
+            "firewalls": {"opnsense1.domain.local": {"ip": "10.10.0.1"}},
+        }
+    )
+
+    assert len(aliases) == 1
+    assert aliases[0].name == "OPNSENSE1_DOMAIN_LOCAL"
+    assert aliases[0].type == "host"
+    assert aliases[0].content == ["10.10.0.1"]
+
+
 def test_load_config_requires_configurator_root(tmp_path):
     config_file = tmp_path / "config.yaml"
     config_file.write_text("foo: bar\n", encoding="utf-8")

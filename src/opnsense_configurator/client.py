@@ -1,13 +1,13 @@
-"""OPNsense-Client auf Basis von pyopnsense."""
+"""Minimaler API-Client für OPNsense."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 import importlib
 import logging
-from typing import Any
+from urllib.parse import urlparse
 
-from .models import AliasDefinition
+import httpx
 
 LOGGER = logging.getLogger(__name__)
 
@@ -18,74 +18,108 @@ class OPNsenseCredentials:
     secret: str
 
 
-class OPNsenseClient:
-    """Kapselt den Zugriff auf die OPNsense API via pyopnsense."""
+def _format_host_for_url(host: str) -> str:
+    if ":" in host and not host.startswith("["):
+        return f"[{host}]"
+    return host
 
-    def __init__(
-        self,
-        base_url: str,
-        credentials: OPNsenseCredentials,
-        timeout: int = 15,
-        ssl_verify: bool = True,
-    ) -> None:
-        normalized_base_url = base_url.rstrip("/")
-        if normalized_base_url.endswith("/api"):
-            normalized_base_url = normalized_base_url[: -len("/api")]
 
-        self.base_url = normalized_base_url
-        self.credentials = credentials
-        self.timeout = timeout
-        self.ssl_verify = ssl_verify
-        self._backend = self._create_backend()
+def _detect_alias_set_command(
+    *,
+    host: str,
+    port: int,
+    credentials: OPNsenseCredentials,
+    ssl_verify: bool,
+    timeout: float,
+) -> str | None:
+    """Detect which alias update command is supported.
 
-    def _create_backend(self) -> Any:
+    Some OPNsense versions expose `POST /api/firewall/alias/set/<uuid>` instead of
+    `POST /api/firewall/alias/set_item/<uuid>`.
+
+    Returns:
+        - "set_item" if the set_item route exists
+        - "set" if the set route exists
+        - None if detection failed
+    """
+
+    dummy_uuid = "00000000-0000-0000-0000-000000000000"
+    base = f"https://{_format_host_for_url(host)}:{port}"
+
+    try:
+        with httpx.Client(
+            base_url=base,
+            auth=(credentials.key, credentials.secret),
+            verify=ssl_verify,
+            timeout=httpx.Timeout(timeout=timeout, connect=min(2.0, timeout)),
+        ) as session:
+            # If route exists we expect anything except 404 (likely 400/500/200 depending on validations).
+            r = session.post(f"/api/firewall/alias/set_item/{dummy_uuid}", json={})
+            if r.status_code != 404:
+                return "set_item"
+
+            r = session.post(f"/api/firewall/alias/set/{dummy_uuid}", json={})
+            if r.status_code != 404:
+                return "set"
+
+    except httpx.HTTPError as exc:
+        LOGGER.warning("Alias endpoint auto-detect failed: %s", exc)
+
+    return None
+
+
+def create_client(
+    base_url: str,
+    credentials: OPNsenseCredentials,
+    *,
+    timeout: int = 15,
+    ssl_verify: bool = True,
+):
+    """Erzeugt einen `oxl-opnsense-client` Client aus URL + Credentials.
+
+    Diese Funktion hält die Integration bewusst klein und "pythonic".
+    """
+
+    try:
+        oxl_module = importlib.import_module("oxl_opnsense_client")
+        oxl_client_type = getattr(oxl_module, "Client")
+    except ModuleNotFoundError as exc:  # pragma: no cover
+        raise RuntimeError(
+            "oxl-opnsense-client ist nicht installiert. "
+            "Installiere es oder nutze ein Environment, in dem es verfügbar ist."
+        ) from exc
+
+    parsed = urlparse(base_url if "://" in base_url else f"https://{base_url}")
+    host = parsed.hostname or base_url
+    port = parsed.port or (443 if parsed.scheme in {"https", ""} else 80)
+
+    # Compatibility: Auto-detect which alias update endpoint exists and patch
+    # OXL's alias command mapping only when needed.
+    detected_command = _detect_alias_set_command(
+        host=host,
+        port=port,
+        credentials=credentials,
+        ssl_verify=ssl_verify,
+        timeout=float(timeout),
+    )
+    if detected_command == "set":
         try:
-            module = importlib.import_module("pyopnsense")
-        except ModuleNotFoundError as exc:
-            raise RuntimeError(
-                "pyopnsense ist nicht installiert. Bitte `pip install pyopnsense` ausführen."
-            ) from exc
+            alias_module = importlib.import_module(
+                "oxl_opnsense_client.plugins.module_utils.main.alias"
+            )
+            OXLAlias = getattr(alias_module, "Alias")
+            if isinstance(getattr(OXLAlias, "CMDS", None), dict):
+                OXLAlias.CMDS["set"] = "set"
+        except ModuleNotFoundError:
+            pass
 
-        backend_cls = getattr(module, "OPNsenseClient", None) or getattr(module, "Client", None)
-        if backend_cls is None:
-            raise RuntimeError("Konnte in pyopnsense keine Client-Klasse finden (OPNsenseClient/Client).")
-
-        attempts = [
-            {"base_url": self.base_url, "api_key": self.credentials.key, "api_secret": self.credentials.secret, "verify_ssl": self.ssl_verify, "timeout": self.timeout},
-            {"url": self.base_url, "key": self.credentials.key, "secret": self.credentials.secret, "verify_ssl": self.ssl_verify, "timeout": self.timeout},
-            {"base_url": self.base_url, "key": self.credentials.key, "secret": self.credentials.secret, "ssl_verify": self.ssl_verify, "timeout": self.timeout},
-        ]
-
-        for kwargs in attempts:
-            try:
-                return backend_cls(**kwargs)
-            except TypeError:
-                continue
-
-        try:
-            return backend_cls(self.base_url, self.credentials.key, self.credentials.secret)
-        except TypeError as exc:
-            raise RuntimeError("Konnte pyopnsense Client nicht initialisieren. Bitte Versionskompatibilität prüfen.") from exc
-
-    def upsert_alias(self, alias: AliasDefinition) -> dict:
-        payload = {
-            "alias": {
-                "name": alias.name,
-                "type": alias.type,
-                "content": "\n".join(alias.content),
-                "description": alias.description or "",
-            }
-        }
-
-        endpoint = "firewall/alias/setItem"
-        backend = self._backend
-
-        if hasattr(backend, "post"):
-            LOGGER.debug("Sende Alias-Update via pyopnsense.post an %s", endpoint)
-            return backend.post(endpoint, payload)
-
-        if hasattr(backend, "request"):
-            LOGGER.debug("Sende Alias-Update via pyopnsense.request an %s", endpoint)
-            return backend.request("POST", endpoint, json=payload)
-
-        raise RuntimeError("pyopnsense Backend bietet weder post() noch request() für API-Aufrufe an.")
+    LOGGER.debug("Erzeuge OXL Client für %s:%s", host, port)
+    return oxl_client_type(
+        firewall=host,
+        port=port,
+        token=credentials.key,
+        secret=credentials.secret,
+        ssl_verify=ssl_verify,
+        api_timeout=float(timeout),
+        shell=False,
+    )

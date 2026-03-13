@@ -5,7 +5,7 @@ description = "Zentrale Verwaltung von OPNsense Aliases und Firewall-Regeln übe
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-  "pyopnsense",
+  "oxl-opnsense-client>=25.7.8",
 ]
 
 [project.optional-dependencies]

@@ -1,117 +1,165 @@
-from types import SimpleNamespace
+import base64
+import importlib
 
-import pytest
-
-from opnsense_configurator.client import OPNsenseClient, OPNsenseCredentials
-from opnsense_configurator.models import AliasDefinition
+import opnsense_configurator.client as client_module
+from opnsense_configurator.client import OPNsenseCredentials, create_client
 
 
-def test_upsert_alias_calls_backend_post(monkeypatch):
-    calls = {}
+class _FakeOXLClient:
+    def __init__(self, **kwargs):
+        self.init_kwargs = kwargs
+        self.calls: list[tuple[str, dict]] = []
 
-    class FakeBackend:
-        def __init__(self, **kwargs):
-            calls["kwargs"] = kwargs
+    def run_module(self, name: str, params: dict, check_mode: bool = False, exit_help: bool = False):
+        self.calls.append((name, params))
+        return {"error": None, "result": {"changed": True, "module": name, "params": params}}
 
-        def post(self, endpoint, payload):
-            calls["endpoint"] = endpoint
-            calls["payload"] = payload
-            return {"result": "ok"}
 
-    monkeypatch.setattr(
-        "importlib.import_module",
-        lambda name: SimpleNamespace(OPNsenseClient=FakeBackend) if name == "pyopnsense" else None,
-    )
+class _FakeHTTPXResponse:
+    def __init__(self, status_code: int):
+        self.status_code = status_code
 
-    client = OPNsenseClient(
+
+class _FakeHTTPXClient:
+    def __init__(self, status_by_path: dict[str, int], **kwargs):
+        self._status_by_path = status_by_path
+        self.init_kwargs = kwargs
+
+    def post(self, url: str, json=None):
+        return _FakeHTTPXResponse(self._status_by_path.get(url, 404))
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+
+def test_create_client_builds_oxl_client_and_allows_run_module(monkeypatch):
+    fake_client: _FakeOXLClient | None = None
+    alias_mod = None
+
+    def fake_httpx_client(**kwargs):
+        # set_item missing, set exists
+        return _FakeHTTPXClient(
+            {
+                "/api/firewall/alias/set_item/00000000-0000-0000-0000-000000000000": 404,
+                "/api/firewall/alias/set/00000000-0000-0000-0000-000000000000": 200,
+            },
+            **kwargs,
+        )
+
+    monkeypatch.setattr(client_module.httpx, "Client", fake_httpx_client)
+
+    def fake_import(name: str):
+        nonlocal fake_client
+        if name == "oxl_opnsense_client":
+            class Mod:
+                @staticmethod
+                def Client(**kwargs):
+                    nonlocal fake_client
+                    fake_client = _FakeOXLClient(**kwargs)
+                    return fake_client
+
+            return Mod
+
+        if name == "oxl_opnsense_client.plugins.module_utils.main.alias":
+            class Alias:
+                CMDS = {"set": "set_item"}
+
+            nonlocal alias_mod
+            alias_mod = type("AliasMod", (), {"Alias": Alias})
+            return alias_mod
+
+        raise ModuleNotFoundError(name)
+
+    monkeypatch.setattr(importlib, "import_module", fake_import)
+
+    client = create_client(
         base_url="https://fw.example.local/",
         credentials=OPNsenseCredentials(key="k", secret="s"),
     )
 
-    response = client.upsert_alias(
-        AliasDefinition(
-            name="HQ-Nodes",
-            content=["10.0.10.10", "10.0.10.11"],
-            description="Hosts im HQ",
-        )
-    )
+    # auto-detect should have patched set -> set
+    assert alias_mod is not None
+    assert alias_mod.Alias.CMDS["set"] == "set"
 
-    assert response == {"result": "ok"}
-    assert calls["endpoint"] == "firewall/alias/setItem"
-    assert calls["kwargs"]["base_url"] == "https://fw.example.local"
-    assert calls["kwargs"]["api_key"] == "k"
-    assert calls["kwargs"]["api_secret"] == "s"
-    assert calls["payload"] == {
-        "alias": {
+    result = client.run_module(
+        "alias",
+        params={
             "name": "HQ-Nodes",
             "type": "host",
-            "content": "10.0.10.10\n10.0.10.11",
+            "content": ["10.0.10.10", "10.0.10.11"],
             "description": "Hosts im HQ",
-        }
-    }
-
-
-def test_upsert_alias_passes_ssl_verify_to_pyopnsense(monkeypatch):
-    calls = {}
-
-    class FakeBackend:
-        def __init__(self, **kwargs):
-            calls["kwargs"] = kwargs
-
-        def post(self, endpoint, payload):
-            return {"result": "ok"}
-
-    monkeypatch.setattr(
-        "importlib.import_module",
-        lambda name: SimpleNamespace(OPNsenseClient=FakeBackend) if name == "pyopnsense" else None,
+            "state": "present",
+        },
     )
 
-    client = OPNsenseClient(
-        base_url="https://fw.example.local/",
+    assert fake_client is not None
+    assert result["result"]["module"] == "alias"
+    assert fake_client.calls == [
+        (
+            "alias",
+            {
+                "name": "HQ-Nodes",
+                "type": "host",
+                "content": ["10.0.10.10", "10.0.10.11"],
+                "description": "Hosts im HQ",
+                "state": "present",
+            },
+        )
+    ]
+
+
+def test_base_url_parsing_extracts_host_and_port(monkeypatch):
+    created: list[_FakeOXLClient] = []
+    alias_mod = None
+
+    def fake_httpx_client(**kwargs):
+        # set_item exists
+        return _FakeHTTPXClient(
+            {
+                "/api/firewall/alias/set_item/00000000-0000-0000-0000-000000000000": 400,
+            },
+            **kwargs,
+        )
+
+    monkeypatch.setattr(client_module.httpx, "Client", fake_httpx_client)
+
+    def fake_import(name: str):
+        if name == "oxl_opnsense_client":
+            class Mod:
+                @staticmethod
+                def Client(**kwargs):
+                    created.append(_FakeOXLClient(**kwargs))
+                    return created[-1]
+
+            return Mod
+
+        if name == "oxl_opnsense_client.plugins.module_utils.main.alias":
+            class Alias:
+                CMDS = {"set": "set_item"}
+
+            nonlocal alias_mod
+            alias_mod = type("AliasMod", (), {"Alias": Alias})
+            return alias_mod
+
+        raise ModuleNotFoundError(name)
+
+    monkeypatch.setattr(importlib, "import_module", fake_import)
+
+    create_client(
+        base_url="https://fw.example.local:8443/api/",
         credentials=OPNsenseCredentials(key="k", secret="s"),
+        timeout=17,
         ssl_verify=False,
     )
 
-    response = client.upsert_alias(AliasDefinition(name="HQ-Nodes", content=["10.0.10.10"]))
+    # If set_item exists, we shouldn't need to import/patch the alias module.
+    assert alias_mod is None
 
-    assert response == {"result": "ok"}
-    assert calls["kwargs"]["verify_ssl"] is False
-
-
-def test_upsert_alias_does_not_duplicate_api_prefix(monkeypatch):
-    calls = {}
-
-    class FakeBackend:
-        def __init__(self, **kwargs):
-            calls["kwargs"] = kwargs
-
-        def post(self, endpoint, payload):
-            return {"result": "ok"}
-
-    monkeypatch.setattr(
-        "importlib.import_module",
-        lambda name: SimpleNamespace(OPNsenseClient=FakeBackend) if name == "pyopnsense" else None,
-    )
-
-    client = OPNsenseClient(
-        base_url="https://fw.example.local/api/",
-        credentials=OPNsenseCredentials(key="k", secret="s"),
-    )
-
-    response = client.upsert_alias(AliasDefinition(name="HQ-Nodes", content=["10.0.10.10"]))
-
-    assert response == {"result": "ok"}
-    assert calls["kwargs"]["base_url"] == "https://fw.example.local"
-
-
-def test_client_raises_helpful_error_when_pyopnsense_missing(monkeypatch):
-    def fail_import(name):
-        raise ModuleNotFoundError(name)
-
-    monkeypatch.setattr("importlib.import_module", fail_import)
-
-    with pytest.raises(RuntimeError, match="pyopnsense ist nicht installiert"):
-        OPNsenseClient(
-            base_url="https://fw.example.local/",
-            credentials=OPNsenseCredentials(key="k", secret="s"),
-        )
+    assert len(created) == 1
+    assert created[0].init_kwargs["firewall"] == "fw.example.local"
+    assert created[0].init_kwargs["port"] == 8443
+    assert created[0].init_kwargs["api_timeout"] == 17.0
+    assert created[0].init_kwargs["ssl_verify"] is False
