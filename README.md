@@ -8,15 +8,6 @@ Ein Python-Projekt für die zentrale Verwaltung von OPNsense-Konfigurationen (zu
 - Bestehende WireGuard-Tunnel als Basis für die Standortvernetzung nutzen.
 - Änderungen deklarativ definieren und reproduzierbar deployen.
 
-## Aktueller Stand
-
-Das Repository enthält ein erstes Grundgerüst mit:
-
-- `OPNsenseClient` für API-Aufrufe.
-- Domänenmodelle für Aliases und Firewall-Regeln.
-- Einfache CLI zum Hochladen eines Alias.
-- Unit-Test für den Alias-API-Call.
-
 ## Lokale Einrichtung
 
 ```bash
@@ -26,7 +17,7 @@ pip install -e .[dev]
 pytest
 ```
 
-## Beispiel: Alias ausrollen
+## Single-Target (wie bisher)
 
 ```bash
 export OPNSENSE_API_KEY="..."
@@ -39,9 +30,45 @@ python -m opnsense_configurator.cli \
   --description "Hosts Standort B"
 ```
 
-## Nächste Schritte
+## Multi-Firewall mit Verzeichnis + YAML
 
-1. Firewall-Regel-Deployment (`filter_base`-Endpoints) ergänzen.
-2. Konfigurationsdatei (YAML/JSON) für Multi-Site Rollouts einführen.
-3. Dry-Run und Diff-Ausgabe implementieren.
-4. Optionale GitOps-Pipeline (z. B. per CI/CD) anbinden.
+### 1) API-Key-Dateien im Verzeichnis
+
+Lege pro Firewall **eine** OPNsense-Keydatei ab (Exportformat):
+
+```text
+key=...
+secret=...
+```
+
+Der Dateiname enthält den FQDN, z. B. `opnsense1.domain.local.txt`.
+
+### 2) YAML-Konfiguration
+
+```yaml
+configurator:
+  firewalls:
+    opnsense1.domain.local:
+      ip: 10.10.0.1
+
+  aliases:
+    management_network:
+      network: 10.10.0.0/24
+```
+
+### 3) Ausrollen
+
+Wenn `--api-key-dir` oder `--config` nicht gesetzt sind, werden automatisch
+`./firewall-keys` und `./config.yaml` verwendet.
+
+```bash
+python -m opnsense_configurator.cli \
+  --api-key-dir ./firewall-keys \
+  --config ./config.yaml
+```
+
+Du kannst deshalb auch einfach starten mit:
+
+```bash
+python -m opnsense_configurator.cli
+```
