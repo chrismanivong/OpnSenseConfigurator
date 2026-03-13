@@ -31,7 +31,11 @@ class OPNsenseClient:
         timeout: int = 15,
         ssl_verify: bool = True,
     ) -> None:
-        self.base_url = base_url.rstrip("/")
+        normalized_base_url = base_url.rstrip("/")
+        if normalized_base_url.endswith("/api"):
+            normalized_base_url = normalized_base_url[: -len("/api")]
+
+        self.base_url = normalized_base_url
         self.credentials = credentials
         self.timeout = timeout
         self.ssl_verify = ssl_verify
