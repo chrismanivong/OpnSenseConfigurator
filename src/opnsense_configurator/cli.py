@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import os
 import re
 from pathlib import Path
@@ -12,6 +13,9 @@ from .models import AliasDefinition
 
 DEFAULT_API_KEY_DIR = "./firewall-keys"
 DEFAULT_CONFIG_PATH = "./config.yaml"
+DEFAULT_LOG_LEVEL = "INFO"
+
+LOGGER = logging.getLogger(__name__)
 
 
 def parse_args() -> argparse.Namespace:
@@ -35,10 +39,27 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--name", help="Alias-Name (Single-Target-Modus)")
     parser.add_argument("--ip", action="append", default=[], help="IP-Eintrag (mehrfach möglich, Single-Target)")
     parser.add_argument("--description", default="", help="Beschreibung für den Alias (Single-Target)")
+    parser.add_argument(
+        "--log-level",
+        default=DEFAULT_LOG_LEVEL,
+        choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
+        help=(
+            "Log-Level für die Ausgabe (Standard: INFO). "
+            "Mögliche Werte: DEBUG, INFO, WARNING, ERROR, CRITICAL."
+        ),
+    )
     return parser.parse_args()
 
 
+def configure_logging(log_level: str) -> None:
+    logging.basicConfig(
+        level=getattr(logging, log_level.upper(), logging.INFO),
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    )
+
+
 def _single_target_credentials() -> tuple[str, OPNsenseCredentials]:
+    LOGGER.debug("Lese Single-Target-Zugangsdaten aus Umgebungsvariablen.")
     key = os.environ.get("OPNSENSE_API_KEY")
     secret = os.environ.get("OPNSENSE_API_SECRET")
 
@@ -49,6 +70,7 @@ def _single_target_credentials() -> tuple[str, OPNsenseCredentials]:
 
 
 def _parse_key_file(file_path: Path) -> OPNsenseCredentials:
+    LOGGER.debug("Lese API-Key-Datei: %s", file_path)
     values: dict[str, str] = {}
     for raw_line in file_path.read_text(encoding="utf-8").splitlines():
         line = raw_line.strip()
@@ -74,6 +96,7 @@ def _fqdn_from_filename(file_path: Path) -> str:
 
 
 def _parse_simple_yaml(text: str) -> dict:
+    LOGGER.debug("Parse YAML-Konfiguration mit vereinfachtem Parser.")
     root: dict = {}
     stack: list[tuple[int, dict]] = [(-1, root)]
 
@@ -105,6 +128,7 @@ def _parse_simple_yaml(text: str) -> dict:
 
 
 def _load_config(config_file: str) -> dict:
+    LOGGER.info("Lade Konfiguration aus %s", config_file)
     data = _parse_simple_yaml(Path(config_file).read_text(encoding="utf-8"))
     if not isinstance(data, dict) or "configurator" not in data:
         raise SystemExit("Ungültige YAML-Konfiguration: 'configurator' fehlt.")
@@ -140,6 +164,7 @@ def _load_targets_from_directory(
     directory: str,
     firewall_mapping: dict[str, dict],
 ) -> list[tuple[str, str, OPNsenseCredentials, bool]]:
+    LOGGER.info("Lade Firewall-Targets aus API-Key-Verzeichnis: %s", directory)
     key_dir = Path(directory)
     if not key_dir.is_dir():
         raise SystemExit(f"API-Key-Verzeichnis nicht gefunden: {directory}")
@@ -156,6 +181,7 @@ def _load_targets_from_directory(
 
         credentials = _parse_key_file(file_path)
         firewall_config = firewall_mapping[fqdn]
+        LOGGER.debug("Target erkannt: %s (%s)", fqdn, firewall_config["ip"])
         targets.append((fqdn, f"https://{firewall_config['ip']}", credentials, _ssl_verify_from_firewall_config(firewall_config)))
 
     return targets
@@ -171,6 +197,7 @@ def _aliases_from_config(config: dict) -> list[AliasDefinition]:
         network = alias_data.get("network") if isinstance(alias_data, dict) else None
         if not network:
             raise SystemExit(f"Alias {alias_name} muss ein Feld 'network' enthalten.")
+        LOGGER.debug("Alias aus Konfiguration geladen: %s -> %s", alias_name, network)
         result.append(AliasDefinition(name=alias_name, type="network", content=[network]))
 
     return result
@@ -178,14 +205,18 @@ def _aliases_from_config(config: dict) -> list[AliasDefinition]:
 
 def main() -> None:
     args = parse_args()
+    configure_logging(args.log_level)
+    LOGGER.info("Starte OPNsense Configurator mit Log-Level %s", args.log_level)
 
     if args.url:
+        LOGGER.info("Single-Target-Modus aktiv für URL: %s", args.url)
         if not args.name:
             raise SystemExit("Bitte --name im Single-Target-Modus angeben.")
         target_name, credentials = _single_target_credentials()
         targets = [(target_name, args.url, credentials, True)]
         aliases = [AliasDefinition(name=args.name, content=args.ip, description=args.description)]
     else:
+        LOGGER.info("Multi-Target-Modus aktiv.")
         config = _load_config(args.config)
         firewalls = config.get("firewalls", {})
         if not firewalls:
@@ -195,8 +226,10 @@ def main() -> None:
         aliases = _aliases_from_config(config)
 
     for target_name, url, credentials, ssl_verify in targets:
+        LOGGER.info("Verbinde mich gleich zur OPNsense API unter %s (%s)", url, target_name)
         client = OPNsenseClient(url, credentials, ssl_verify=ssl_verify)
         for alias in aliases:
+            LOGGER.debug("Rolle Alias '%s' auf '%s' aus", alias.name, target_name)
             result = client.upsert_alias(alias)
             print(f"[{target_name}] {alias.name}: {result}")
 
