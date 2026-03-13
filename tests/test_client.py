@@ -86,3 +86,34 @@ def test_upsert_alias_can_disable_ssl_verification(monkeypatch):
     assert response == {"result": "ok"}
     assert called["context"] is not None
     assert called["context"].check_hostname is False
+
+
+def test_upsert_alias_does_not_duplicate_api_prefix(monkeypatch):
+    called = {}
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return None
+
+        @staticmethod
+        def read():
+            return b'{"result":"ok"}'
+
+    def fake_urlopen(req, timeout, context=None):
+        called["req"] = req
+        return FakeResponse()
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+
+    client = OPNsenseClient(
+        base_url="https://fw.example.local/api/",
+        credentials=OPNsenseCredentials(key="k", secret="s"),
+    )
+
+    response = client.upsert_alias(AliasDefinition(name="HQ-Nodes", content=["10.0.10.10"]))
+
+    assert response == {"result": "ok"}
+    assert called["req"].full_url == "https://fw.example.local/api/firewall/alias/setItem"
