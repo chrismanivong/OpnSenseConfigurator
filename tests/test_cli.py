@@ -3,6 +3,7 @@ import pytest
 from opnsense_configurator.cli import (
     DEFAULT_API_KEY_DIR,
     DEFAULT_CONFIG_PATH,
+    _fqdn_from_filename,
     _aliases_from_config,
     _load_config,
     _load_targets_from_directory,
@@ -27,6 +28,19 @@ def test_load_targets_uses_firewall_ip_mapping(tmp_path):
 
     assert [(name, url) for name, url, _ in targets] == [
         ("opnsense1.domain.local", "https://10.10.0.1"),
+    ]
+
+
+def test_load_targets_supports_apikey_suffix_filename(tmp_path):
+    (tmp_path / "off-opn-01.office.local_root_apikey.txt").write_text(
+        "key=key-a\nsecret=secret-a\n", encoding="utf-8"
+    )
+    firewalls = {"off-opn-01.office.local": {"ip": "10.10.0.1"}}
+
+    targets = _load_targets_from_directory(str(tmp_path), firewalls)
+
+    assert [(name, url) for name, url, _ in targets] == [
+        ("off-opn-01.office.local", "https://10.10.0.1"),
     ]
 
 
@@ -58,3 +72,9 @@ def test_load_config_requires_configurator_root(tmp_path):
 
     with pytest.raises(SystemExit, match="configurator"):
         _load_config(str(config_file))
+
+
+def test_fqdn_from_filename_falls_back_to_stem_for_legacy_names(tmp_path):
+    file_path = tmp_path / "opnsense1.domain.local.txt"
+
+    assert _fqdn_from_filename(file_path) == "opnsense1.domain.local"

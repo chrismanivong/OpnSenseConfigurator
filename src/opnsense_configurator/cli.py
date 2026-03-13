@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 from pathlib import Path
 
 from .client import OPNsenseClient, OPNsenseCredentials
@@ -65,7 +66,11 @@ def _parse_key_file(file_path: Path) -> OPNsenseCredentials:
 
 
 def _fqdn_from_filename(file_path: Path) -> str:
-    return file_path.stem
+    stem = file_path.stem
+    match = re.match(r"^(?P<fqdn>.+?)_[^_]+_apikey$", stem)
+    if match:
+        return match.group("fqdn")
+    return stem
 
 
 def _parse_simple_yaml(text: str) -> dict:
