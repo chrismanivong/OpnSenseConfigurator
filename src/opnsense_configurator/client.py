@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import base64
 import json
+import ssl
 from urllib import request
 
 from .models import AliasDefinition
@@ -23,10 +24,17 @@ class OPNsenseClient:
     im nächsten Schritt, sobald das Datenmodell finalisiert ist.
     """
 
-    def __init__(self, base_url: str, credentials: OPNsenseCredentials, timeout: int = 15) -> None:
+    def __init__(
+        self,
+        base_url: str,
+        credentials: OPNsenseCredentials,
+        timeout: int = 15,
+        ssl_verify: bool = True,
+    ) -> None:
         self.base_url = base_url.rstrip("/")
         self.credentials = credentials
         self.timeout = timeout
+        self.ssl_verify = ssl_verify
 
     def _request(self, method: str, endpoint: str, json_data: dict | None = None) -> dict:
         url = f"{self.base_url}/api/{endpoint.lstrip('/')}"
@@ -44,7 +52,13 @@ class OPNsenseClient:
             },
         )
 
-        with request.urlopen(req, timeout=self.timeout) as response:
+        context = None
+        if not self.ssl_verify:
+            context = ssl.create_default_context()
+            context.check_hostname = False
+            context.verify_mode = ssl.CERT_NONE
+
+        with request.urlopen(req, timeout=self.timeout, context=context) as response:
             return json.loads(response.read().decode())
 
     def upsert_alias(self, alias: AliasDefinition) -> dict:
