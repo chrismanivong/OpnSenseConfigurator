@@ -111,10 +111,35 @@ def _load_config(config_file: str) -> dict:
     return data["configurator"]
 
 
+def _to_bool(value: object, default: bool = True) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "yes", "1", "on"}:
+            return True
+        if normalized in {"false", "no", "0", "off"}:
+            return False
+    return default
+
+
+def _ssl_verify_from_firewall_config(firewall_config: dict) -> bool:
+    if not isinstance(firewall_config, dict):
+        return True
+
+    if "ssl_verify" in firewall_config:
+        return _to_bool(firewall_config["ssl_verify"], default=True)
+    if "ssl_verfiy" in firewall_config:
+        return _to_bool(firewall_config["ssl_verfiy"], default=True)
+    if "ssl" in firewall_config:
+        return _to_bool(firewall_config["ssl"], default=True)
+    return True
+
+
 def _load_targets_from_directory(
     directory: str,
     firewall_mapping: dict[str, dict],
-) -> list[tuple[str, str, OPNsenseCredentials]]:
+) -> list[tuple[str, str, OPNsenseCredentials, bool]]:
     key_dir = Path(directory)
     if not key_dir.is_dir():
         raise SystemExit(f"API-Key-Verzeichnis nicht gefunden: {directory}")
@@ -123,14 +148,15 @@ def _load_targets_from_directory(
     if not files:
         raise SystemExit(f"Keine API-Key-Dateien in {directory} gefunden.")
 
-    targets: list[tuple[str, str, OPNsenseCredentials]] = []
+    targets: list[tuple[str, str, OPNsenseCredentials, bool]] = []
     for file_path in files:
         fqdn = _fqdn_from_filename(file_path)
         if fqdn not in firewall_mapping or "ip" not in firewall_mapping[fqdn]:
             raise SystemExit(f"Firewall-Mapping für {fqdn} fehlt oder hat keine 'ip'.")
 
         credentials = _parse_key_file(file_path)
-        targets.append((fqdn, f"https://{firewall_mapping[fqdn]['ip']}", credentials))
+        firewall_config = firewall_mapping[fqdn]
+        targets.append((fqdn, f"https://{firewall_config['ip']}", credentials, _ssl_verify_from_firewall_config(firewall_config)))
 
     return targets
 
@@ -157,7 +183,7 @@ def main() -> None:
         if not args.name:
             raise SystemExit("Bitte --name im Single-Target-Modus angeben.")
         target_name, credentials = _single_target_credentials()
-        targets = [(target_name, args.url, credentials)]
+        targets = [(target_name, args.url, credentials, True)]
         aliases = [AliasDefinition(name=args.name, content=args.ip, description=args.description)]
     else:
         config = _load_config(args.config)
@@ -168,8 +194,8 @@ def main() -> None:
         targets = _load_targets_from_directory(args.api_key_dir, firewalls)
         aliases = _aliases_from_config(config)
 
-    for target_name, url, credentials in targets:
-        client = OPNsenseClient(url, credentials)
+    for target_name, url, credentials, ssl_verify in targets:
+        client = OPNsenseClient(url, credentials, ssl_verify=ssl_verify)
         for alias in aliases:
             result = client.upsert_alias(alias)
             print(f"[{target_name}] {alias.name}: {result}")
