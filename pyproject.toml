@@ -1,0 +1,19 @@
+[project]
+name = "opnsense-configurator"
+version = "0.1.0"
+description = "Zentrale Verwaltung von OPNsense Aliases und Firewall-Regeln über die OPNsense API"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.3.0",
+]
+
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
