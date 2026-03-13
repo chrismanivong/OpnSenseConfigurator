@@ -5,10 +5,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 import base64
 import json
+import logging
 import ssl
 from urllib import request
 
 from .models import AliasDefinition
+
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -42,6 +45,8 @@ class OPNsenseClient:
 
     def _request(self, method: str, endpoint: str, json_data: dict | None = None) -> dict:
         url = f"{self.base_url}/api/{endpoint.lstrip('/')}"
+        LOGGER.info("API-Connect: %s", url)
+        LOGGER.debug("Sende %s Request an Endpoint %s", method, endpoint)
         raw_auth = f"{self.credentials.key}:{self.credentials.secret}".encode()
         auth_header = base64.b64encode(raw_auth).decode()
 
@@ -58,12 +63,15 @@ class OPNsenseClient:
 
         context = None
         if not self.ssl_verify:
+            LOGGER.warning("SSL-Verifikation ist deaktiviert für %s", self.base_url)
             context = ssl.create_default_context()
             context.check_hostname = False
             context.verify_mode = ssl.CERT_NONE
 
         with request.urlopen(req, timeout=self.timeout, context=context) as response:
-            return json.loads(response.read().decode())
+            response_json = json.loads(response.read().decode())
+            LOGGER.debug("Antwort von %s erhalten: %s", url, response_json)
+            return response_json
 
     def upsert_alias(self, alias: AliasDefinition) -> dict:
         """Legt einen Alias an oder aktualisiert ihn per setItem-Endpoint."""

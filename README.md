@@ -72,3 +72,13 @@ Du kannst deshalb auch einfach starten mit:
 ```bash
 python -m opnsense_configurator.cli
 ```
+
+## Logging
+
+Das Logging ist über `--log-level` konfigurierbar (z. B. `DEBUG`, `INFO`, `WARNING`).
+
+```bash
+python -m opnsense_configurator.cli --log-level DEBUG
+```
+
+API-Verbindungen werden informell mit der Ziel-URL angekündigt.
