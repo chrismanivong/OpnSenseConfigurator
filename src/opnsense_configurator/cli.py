@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import logging
 import os
 import re
@@ -242,6 +243,100 @@ def _aliases_from_config(config: dict) -> list[AliasDefinition]:
     return list(by_name.values())
 
 
+def _split_fqdn(fqdn: str) -> tuple[str, str]:
+    if "." not in fqdn:
+        raise SystemExit(
+            f"Firewall-Name '{fqdn}' ist kein FQDN. Für Unbound Overrides wird ein Name wie 'fw.example.local' benötigt."
+        )
+    hostname, domain = fqdn.split(".", 1)
+    if not hostname or not domain:
+        raise SystemExit(
+            f"Firewall-Name '{fqdn}' ist ungültig. Für Unbound Overrides wird ein Name wie 'fw.example.local' benötigt."
+        )
+    return hostname, domain
+
+
+def _unbound_record_type_for_ip(ip: str) -> str:
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError as exc:
+        raise SystemExit(f"Firewall-IP '{ip}' ist keine gültige IP-Adresse.") from exc
+    return "AAAA" if addr.version == 6 else "A"
+
+
+def _unbound_modules_for_target(target_fqdn: str, firewalls: dict[str, dict]) -> list[tuple[str, dict]]:
+    if target_fqdn not in firewalls or not isinstance(firewalls[target_fqdn], dict):
+        raise SystemExit(f"Firewall-Konfiguration für '{target_fqdn}' fehlt.")
+    target_ip = firewalls[target_fqdn].get("ip")
+    if not target_ip:
+        raise SystemExit(f"Firewall '{target_fqdn}' hat keine 'ip' in der Konfiguration.")
+
+    hostname, domain = _split_fqdn(target_fqdn)
+    record_type = _unbound_record_type_for_ip(str(target_ip))
+
+    modules: list[tuple[str, dict]] = [
+        (
+            "unbound_host",
+            {
+                "hostname": hostname,
+                "domain": domain,
+                "record_type": record_type,
+                "value": str(target_ip),
+                "description": f"Firewall {target_fqdn}",
+                # OXL's default match_fields includes `prio`, but for A/AAAA
+                # records OPNsense typically stores prio as an empty string.
+                # That mismatch leads to duplicates on repeated runs.
+                "match_fields": ["hostname", "domain", "record_type", "value"],
+                "enabled": True,
+                "state": "present",
+            },
+        )
+    ]
+
+    domain_to_server: dict[str, str] = {}
+    for other_fqdn, other_cfg in firewalls.items():
+        if other_fqdn == target_fqdn:
+            continue
+        if not isinstance(other_cfg, dict):
+            continue
+        other_ip = other_cfg.get("ip")
+        if not other_ip:
+            continue
+
+        _, other_domain = _split_fqdn(str(other_fqdn))
+
+        # Skip our own domain; Unbound will already be authoritative for local data.
+        if other_domain == domain:
+            continue
+
+        existing = domain_to_server.get(other_domain)
+        if existing and existing != str(other_ip):
+            raise SystemExit(
+                f"Mehrere Firewalls teilen sich die Domain '{other_domain}' (z.B. {existing} und {other_ip}). "
+                "Unbound Domain Overrides unterstützen hier nur einen Server; bitte Domain-Zuordnung eindeutig machen."
+            )
+        domain_to_server[other_domain] = str(other_ip)
+
+    for other_domain, server_ip in sorted(domain_to_server.items()):
+        modules.append(
+            (
+                "unbound_forward",
+                {
+                    "domain": other_domain,
+                    "target": server_ip,
+                    "type": "forward",
+                    "port": 53,
+                    "forward_tcp": False,
+                    "description": f"Forward {other_domain} -> {server_ip}",
+                    "enabled": True,
+                    "state": "present",
+                },
+            )
+        )
+
+    return modules
+
+
 def main() -> None:
     args = parse_args()
     configure_logging(args.log_level)
@@ -267,6 +362,15 @@ def main() -> None:
     for target_name, url, credentials, ssl_verify in targets:
         LOGGER.info("Verbinde mich gleich zur OPNsense API unter %s (%s)", url, target_name)
         client = create_client(url, credentials, ssl_verify=ssl_verify)
+
+        if not args.url:
+            for module_name, params in _unbound_modules_for_target(target_name, firewalls):
+                LOGGER.debug("Rolle Unbound '%s' auf '%s' aus", module_name, target_name)
+                response = client.run_module(module_name, params=params)
+                if response.get("error"):
+                    raise SystemExit(f"[{target_name}] {module_name}: {response['error']}")
+                print(f"[{target_name}] {module_name}: {response['result']}")
+
         for alias in aliases:
             LOGGER.debug("Rolle Alias '%s' auf '%s' aus", alias.name, target_name)
             response = client.run_module(

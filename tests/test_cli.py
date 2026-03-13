@@ -8,6 +8,7 @@ from opnsense_configurator.cli import (
     _load_config,
     _load_targets_from_directory,
     _ssl_verify_from_firewall_config,
+    _unbound_modules_for_target,
     parse_args,
 )
 
@@ -118,3 +119,50 @@ def test_load_targets_disables_ssl_verification_when_ssl_is_false(tmp_path):
 
 def test_ssl_verify_supports_misspelled_ssl_verfiy_key():
     assert _ssl_verify_from_firewall_config({"ssl_verfiy": "false"}) is False
+
+
+def test_unbound_modules_for_target_sets_local_host_override_and_other_domain_overrides():
+    firewalls = {
+        "off-opn-01.office.local": {"ip": "10.10.0.1"},
+        "home-opn-01.home.local": {"ip": "10.10.20.1"},
+        "see-opn-01.see.local": {"ip": "10.10.30.1"},
+    }
+
+    modules = _unbound_modules_for_target("off-opn-01.office.local", firewalls)
+
+    assert modules[0][0] == "unbound_host"
+    assert modules[0][1]["hostname"] == "off-opn-01"
+    assert modules[0][1]["domain"] == "office.local"
+    assert modules[0][1]["record_type"] == "A"
+    assert modules[0][1]["value"] == "10.10.0.1"
+    assert modules[0][1]["match_fields"] == ["hostname", "domain", "record_type", "value"]
+
+    domain_overrides = [m for m in modules if m[0] == "unbound_forward"]
+    assert {m[1]["domain"]: m[1]["target"] for m in domain_overrides} == {
+        "home.local": "10.10.20.1",
+        "see.local": "10.10.30.1",
+    }
+
+    for _, params in domain_overrides:
+        assert params["type"] == "forward"
+        assert params["port"] == 53
+        assert params["forward_tcp"] is False
+
+
+def test_unbound_modules_for_target_raises_on_conflicting_other_domains():
+    firewalls = {
+        "opn-a.office.local": {"ip": "10.10.0.1"},
+        "opn-b.office.local": {"ip": "10.10.0.2"},
+        "opn-c.other.local": {"ip": "10.10.9.1"},
+    }
+
+    # For target in other.local, office.local would have two possible servers.
+    with pytest.raises(SystemExit, match="Mehrere Firewalls teilen sich die Domain 'office\\.local'"):
+        _unbound_modules_for_target("opn-c.other.local", firewalls)
+
+
+def test_unbound_modules_for_target_requires_fqdn():
+    firewalls = {"opnsense1": {"ip": "10.10.0.1"}}
+
+    with pytest.raises(SystemExit, match="kein FQDN"):
+        _unbound_modules_for_target("opnsense1", firewalls)
